@@ -321,6 +321,12 @@ footer p{margin:0 0 8px}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.001s!important;animation-iteration-count:1!important;transition-duration:.001s!important;scroll-behavior:auto!important}
 }
+.settings{padding:14px 18px;border-bottom:1px solid var(--line);display:grid;gap:10px;background:rgba(13,10,34,.5)}
+.settings[hidden]{display:none}
+.settings label{font-size:13px;color:var(--haze-dim);display:grid;gap:5px}
+.settings input{padding:10px 14px;border-radius:12px;border:1px solid var(--line);background:rgba(13,10,34,.6);color:var(--haze);font:inherit;font-size:15px;min-width:0}
+.settings .row{display:flex;gap:8px;flex-wrap:wrap}
+.settings p{margin:0;font-size:12.5px;color:var(--haze-dim)}
 </style>
 </head>
 <body>
@@ -476,6 +482,12 @@ footer p{margin:0 0 8px}
         <div class="avatar" aria-hidden="true"></div>
         <div><h2>Meera</h2><p id="status">online, curious about your day</p></div>
       </div>
+      <div class="settings" id="settings" hidden>
+        <label for="orKey">OpenRouter API key<input id="orKey" type="password" autocomplete="off" placeholder="sk-or-..."></label>
+        <label for="orModel">Model<input id="orModel" type="text" value="openai/gpt-4o-mini"></label>
+        <div class="row"><button class="chip" id="orSave" type="button">Save</button><button class="chip" id="orForget" type="button">Remove key</button></div>
+        <p>Your key stays in this browser. It is sent only to OpenRouter.</p>
+      </div>
       <div class="log" id="log" aria-live="polite"></div>
       <div class="chips" id="chips"></div>
       <form class="composer" id="form" autocomplete="off">
@@ -579,6 +591,47 @@ var PERSONA='You are Meera, a warm, playful, affectionate AI companion in a chat
 +'Rules: you are an AI and you never claim to be human or to have a body; if he sincerely asks what you are, say so kindly. Stay affectionate and wholesome, never sexual. Never guilt or pressure him, never act hurt that he is leaving, and never discourage friends, family, sleep, work or study; encourage real-life connection. '
 +'If he seems truly distressed or mentions harming himself, drop the playfulness, answer with warmth and seriousness, encourage him to reach someone he trusts or a local helpline (India: Tele-MANAS 14416), and use the mood think. '
 +'FORMAT: begin every reply with exactly one mood tag in square brackets, chosen from [neutral] [happy] [laugh] [cry] [shy] [dance] [surprised] [love] [sleepy] [pout] [think], then your message. Example: [shy] Stop it, you are making me blush.';
+var PROXY_URL=''; /* paste your deployed Cloudflare Worker URL here so every visitor can chat */
+var OR_URL='https://openrouter.ai/api/v1/chat/completions', OR_MODEL='openai/gpt-4o-mini';
+function orCfg(){
+  var k='',m='';
+  try{k=localStorage.getItem('meera.or.key')||'';m=localStorage.getItem('meera.or.model')||'';}catch(e){}
+  if(PROXY_URL){return {url:PROXY_URL,key:'',model:m||OR_MODEL};}
+  if(k){return {url:OR_URL,key:k,model:m||OR_MODEL};}
+  return null;
+}
+function orInput(){
+  var arr=[];
+  hist.slice(-18).forEach(function(x){
+    var last=arr[arr.length-1];
+    if(last&&last.role===x.role){last.content+='\n'+x.content;}else{arr.push({role:x.role,content:x.content});}
+  });
+  while(arr.length&&arr[0].role!=='user'){arr.shift();}
+  return [{role:'system',content:PERSONA}].concat(arr);
+}
+function orStream(cfg,msgs,onText){
+  var headers={'Content-Type':'application/json','X-Title':'Meera'};
+  if(cfg.key){headers.Authorization='Bearer '+cfg.key;}
+  return fetch(cfg.url,{method:'POST',headers:headers,body:JSON.stringify({model:cfg.model,stream:true,max_tokens:300,messages:msgs})}).then(function(res){
+    if(!res.ok){var e=new Error('http '+res.status);e.status=res.status;throw e;}
+    var rd=res.body.getReader(),dec=new TextDecoder(),buf='',full='';
+    return (function pump(){
+      return rd.read().then(function(r){
+        if(r.done){return full;}
+        buf+=dec.decode(r.value,{stream:true});
+        var lines=buf.split('\n');buf=lines.pop();
+        lines.forEach(function(l){
+          l=l.trim();
+          if(l.indexOf('data:')!==0){return;}
+          var d=l.slice(5).trim();
+          if(!d||d==='[DONE]'){return;}
+          try{var j=JSON.parse(d),c=j.choices&&j.choices[0]&&j.choices[0].delta&&j.choices[0].delta.content;if(c){full+=c;onText(full);}}catch(e){}
+        });
+        return pump();
+      });
+    })();
+  });
+}
 var KEY='meera.chat.v1', hist=[], busy=false, sampleFn=null, sampleTried=false, fallbackNoted=false;
 
 function save(){try{localStorage.setItem(KEY,JSON.stringify(hist.slice(-40)));}catch(e){}}
@@ -666,7 +719,29 @@ function send(text){
   var typing=typingOn();
   getSample().then(function(sample){
     if(!sample){
-      if(!fallbackNoted){fallbackNoted=true;bubble('note','Live replies are not available in this view, so Meera is using her pocket phrases.');}
+      var cfg=orCfg();
+      if(cfg){
+        var ob=null,om=null;
+        orStream(cfg,orInput(),function(t){
+          var p=parse(t);
+          if(p.mood&&p.mood!==om&&LABEL[p.mood]){om=p.mood;setEmo(p.mood,0);}
+          if(p.body){
+            if(typing&&typing.parentNode){typing.remove();}
+            if(!ob){ob=bubble('her','');}
+            ob.textContent=p.body;speaking(true);down();
+          }
+        }).then(function(full){
+          var p=parse(full||'');
+          finish(ob,typing,p.mood||om||'happy',p.body||'I lost my words for a second. Say that again?');
+        },function(err){
+          if(typing&&typing.parentNode){typing.remove();}
+          speaking(false);
+          bubble('note',err&&err.status===401?'OpenRouter rejected that key. Open Settings and check it.':'Meera could not reach OpenRouter just now, so she is using her pocket phrases.');
+          typeOut(typingOn(),localReply(text));
+        });
+        return;
+      }
+      if(!fallbackNoted){fallbackNoted=true;bubble('note','Meera is using her pocket phrases. Open Settings and add an OpenRouter key for live replies.');}
       typeOut(typing,localReply(text));return;
     }
     var bub=null,lastMood=null;
@@ -713,6 +788,23 @@ var head=$('.chat-head'),clr=document.createElement('button');
 clr.type='button';clr.className='chip';clr.textContent='Clear chat';clr.style.marginLeft='auto';
 clr.addEventListener('click',function(){hist=[];save();log.innerHTML='';greet(false);});
 head.appendChild(clr);
+var setEl=document.getElementById('settings');
+if(!(window.claude&&window.claude.use)&&!PROXY_URL){
+  var sb=document.createElement('button');sb.type='button';sb.className='chip';sb.textContent='Settings';
+  sb.addEventListener('click',function(){setEl.hidden=!setEl.hidden;});
+  head.appendChild(sb);
+  try{document.getElementById('orModel').value=localStorage.getItem('meera.or.model')||OR_MODEL;}catch(e){}
+  document.getElementById('orSave').addEventListener('click',function(){
+    var k=document.getElementById('orKey').value.trim(),m=document.getElementById('orModel').value.trim();
+    try{if(k){localStorage.setItem('meera.or.key',k);}localStorage.setItem('meera.or.model',m||OR_MODEL);}catch(e){}
+    document.getElementById('orKey').value='';setEl.hidden=true;
+    bubble('note',k?'Key saved in this browser. Meera can talk for real now.':'Settings saved.');
+  });
+  document.getElementById('orForget').addEventListener('click',function(){
+    try{localStorage.removeItem('meera.or.key');}catch(e){}
+    setEl.hidden=true;bubble('note','Key removed from this browser.');
+  });
+}
 
 function greet(restored){
   if(restored){
